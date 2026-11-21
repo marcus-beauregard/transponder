@@ -133,22 +133,28 @@ func TestAllTargetsRateLimited(t *testing.T) {
 			_, _ = io.WriteString(w, `{"error":{"message":"slow down"}}`)
 		}
 	}
-	a := countedUpstream(t, limited("30"))
-	b := countedUpstream(t, limited("5"))
-	e := setupRoutes(t, route("*", oaTarget("a", "", a), oaTarget("b", "", b)))
-	res := e.post(t, ping)
-	if res.status != http.StatusTooManyRequests || errorCode(t, res) != "upstream_rate_limited" {
-		t.Fatalf("status %d: %s", res.status, res.body)
-	}
-	if got := res.header.Get("Retry-After"); got != "5" {
-		t.Fatalf("Retry-After %q, want the shortest wait a provider gave", got)
-	}
-	if body := string(res.body); !strings.Contains(body, "retry after 5 seconds") {
-		t.Fatalf("body %q", body)
-	}
-	recs := e.usage(t)
-	if len(recs) != 1 || recs[0].Provider != "b" || recs[0].Fallbacks != 1 || recs[0].Status != http.StatusTooManyRequests {
-		t.Fatalf("records %+v", recs)
+	for name, send := range map[string]string{"plain": ping, "stream": streamPing} {
+		t.Run(name, func(t *testing.T) {
+			a := countedUpstream(t, limited("30"))
+			b := countedUpstream(t, limited("5"))
+			e := setupRoutes(t, route("*", oaTarget("a", "", a), oaTarget("b", "", b)))
+			res := e.post(t, send)
+			// A stream answers before it starts, so the caller gets the same 429 as a plain
+			// request rather than a stream that opens and dies.
+			if res.status != http.StatusTooManyRequests || errorCode(t, res) != "upstream_rate_limited" {
+				t.Fatalf("status %d: %s", res.status, res.body)
+			}
+			if got := res.header.Get("Retry-After"); got != "5" {
+				t.Fatalf("Retry-After %q, want the shortest wait a provider gave", got)
+			}
+			if body := string(res.body); !strings.Contains(body, "retry after 5 seconds") {
+				t.Fatalf("body %q", body)
+			}
+			recs := e.usage(t)
+			if len(recs) != 1 || recs[0].Provider != "b" || recs[0].Fallbacks != 1 || recs[0].Status != http.StatusTooManyRequests {
+				t.Fatalf("records %+v", recs)
+			}
+		})
 	}
 }
 

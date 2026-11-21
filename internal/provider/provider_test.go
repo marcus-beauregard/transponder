@@ -79,8 +79,40 @@ func TestSendKeepsRetryAfter(t *testing.T) {
 	defer srv.Close()
 	_, err := Send(context.Background(), srv.Client(), "p", srv.URL, []byte("{}"), nil, http.Header{})
 	var pe *Error
-	if !errors.As(err, &pe) || pe.Status != http.StatusTooManyRequests || pe.RetryAfter != 30*time.Second {
+	if !errors.As(err, &pe) || pe.Status != http.StatusTooManyRequests || pe.RetryAfter > 30*time.Second || pe.RetryAfter < 29*time.Second {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestSendCountsDownTheWaitWhileReadingTheBody(t *testing.T) {
+	// A wait counts from the headers, so the time the error body takes to arrive comes off it.
+	// The body is held open until the test has seen the headers, so the size of the wait owes
+	// nothing to how fast the machine is: the answer is the minute the provider asked for, less
+	// however long the body was held.
+	started, release := make(chan struct{}), make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.(http.Flusher).Flush()
+		close(started)
+		<-release
+		_, _ = w.Write([]byte("{}"))
+	}))
+	defer srv.Close()
+	done := make(chan error, 1)
+	go func() {
+		_, err := Send(context.Background(), srv.Client(), "p", srv.URL, []byte("{}"), nil, http.Header{})
+		done <- err
+	}()
+	<-started
+	close(release)
+	err := <-done
+	var pe *Error
+	if !errors.As(err, &pe) {
+		t.Fatalf("err = %v", err)
+	}
+	if pe.RetryAfter <= 0 || pe.RetryAfter >= time.Minute {
+		t.Fatalf("RetryAfter = %v, want the minute less the time the body took", pe.RetryAfter)
 	}
 }
 

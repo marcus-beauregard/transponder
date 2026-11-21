@@ -45,9 +45,12 @@ func Send(ctx context.Context, client *http.Client, name, url string, body []byt
 	}
 	defer func() { _ = resp.Body.Close() }()
 	// Read the wait the headers asked for before the body: an HTTP date is a deadline, and a
-	// slow error body would otherwise push every wait further into the future.
-	retryWait := retryAfter(resp.Header, time.Now())
+	// slow error body would otherwise push every wait further into the future. The wait counts
+	// from the headers, so the time the body took to arrive comes off it.
+	observed := time.Now()
+	retryWait := retryAfter(resp.Header, observed)
 	errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+	retryWait = waitLeft(retryWait, time.Since(observed))
 	return nil, &Error{
 		Provider:   name,
 		Status:     resp.StatusCode,
@@ -56,6 +59,15 @@ func Send(ctx context.Context, client *http.Client, name, url string, body []byt
 		Body:       errBody,
 		Err:        fmt.Errorf("upstream answered %s", resp.Status),
 	}
+}
+
+// waitLeft is what remains of a wait once spent has passed since it was measured. A wait
+// that has run out is no wait at all.
+func waitLeft(wait, spent time.Duration) time.Duration {
+	if left := wait - spent; left > 0 {
+		return left
+	}
+	return 0
 }
 
 // retryAfter reads a Retry-After header, given in seconds or as an HTTP date, and cuts it

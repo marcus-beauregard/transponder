@@ -49,7 +49,11 @@ func TestRateLimitRetryAfterCountsDown(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			clock := &testClock{t: time.Now()}
+			// The gateway reads the clock a test can move, but the provider parses the header
+			// with the real one. Starting the fake clock on a whole second keeps it just
+			// behind the real clock, so a date-shaped wait is measured on the second it named
+			// rather than a second late.
+			clock := &testClock{t: time.Now().Truncate(time.Second)}
 			a := countedUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Retry-After", tc.first(clock))
 				w.WriteHeader(http.StatusTooManyRequests)
