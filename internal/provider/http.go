@@ -44,12 +44,15 @@ func Send(ctx context.Context, client *http.Client, name, url string, body []byt
 		return resp, nil
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// Read the wait the headers asked for before the body: an HTTP date is a deadline, and a
+	// slow error body would otherwise push every wait further into the future.
+	retryWait := retryAfter(resp.Header, time.Now())
 	errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 	return nil, &Error{
 		Provider:   name,
 		Status:     resp.StatusCode,
 		Retryable:  RetryableStatus(resp.StatusCode),
-		RetryAfter: retryAfter(resp.Header, time.Now()),
+		RetryAfter: retryWait,
 		Body:       errBody,
 		Err:        fmt.Errorf("upstream answered %s", resp.Status),
 	}

@@ -69,12 +69,30 @@ func rateLimitWait(err error) (time.Duration, bool) {
 	return 0, false
 }
 
-// shortestWait is the shorter of two waits the providers gave, where zero means none given.
-func shortestWait(a, b time.Duration) time.Duration {
-	if a == 0 || (b > 0 && b < a) {
-		return b
+// earliestRetry is the earlier of the deadline already recorded and now+d, where d is the
+// wait a rate-limited provider asked for and zero means it asked for none. A deadline is an
+// instant rather than a duration because the caller is told the wait when the answer is
+// written, which can be long after the attempt that set it.
+func earliestRetry(now, deadline time.Time, d time.Duration) time.Time {
+	if d <= 0 {
+		return deadline
 	}
-	return a
+	asked := now.Add(d)
+	if deadline.IsZero() || asked.Before(deadline) {
+		return asked
+	}
+	return deadline
+}
+
+// timeLeft is how long remains until deadline, or zero when it has passed or was never set.
+func timeLeft(now, deadline time.Time) time.Duration {
+	if deadline.IsZero() {
+		return 0
+	}
+	if left := deadline.Sub(now); left > 0 {
+		return left
+	}
+	return 0
 }
 
 // run tries the plan's targets in order until one answers. attempt returns nil once it has
@@ -86,10 +104,11 @@ func (g *gateway) run(c *call, attempt func() error) {
 	var upstream, input *attemptError
 	var failedTarget router.Resolved
 	failedAt := 0
-	// rateLimited says every attempt so far was answered with 429 or 529, and wait is the
-	// shortest Retry-After any of them gave.
+	// rateLimited says every attempt so far was answered with 429 or 529, and retryBy is the
+	// earliest deadline any of them gave. The time spent on the other attempts comes off the
+	// wait the caller is told about, since a Retry-After is a deadline, not a delay to restart.
 	rateLimited := true
-	var wait time.Duration
+	var retryBy time.Time
 	for i, t := range c.plan.Targets {
 		g.use(c, t, i)
 		try := g.try(c, i)
@@ -123,7 +142,7 @@ func (g *gateway) run(c *call, attempt func() error) {
 		try.failed(ae.err)
 		upstream, failedTarget, failedAt = ae, t, i
 		if d, ok := rateLimitWait(ae.err); ok {
-			wait = shortestWait(wait, d)
+			retryBy = earliestRetry(g.d.Now(), retryBy, d)
 		} else {
 			rateLimited = false
 		}
@@ -142,7 +161,7 @@ func (g *gateway) run(c *call, attempt func() error) {
 		// the target that had it, not one that was skipped after it.
 		g.use(c, failedTarget, failedAt)
 		if rateLimited {
-			g.rateLimited(c, wait)
+			g.rateLimited(c, timeLeft(g.d.Now(), retryBy))
 			return
 		}
 		g.upstreamFailed(c, upstream.err, upstream.same)
