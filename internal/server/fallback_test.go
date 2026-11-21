@@ -240,6 +240,61 @@ func TestRateLimitWithSkippedTarget(t *testing.T) {
 	}
 }
 
+func TestQuotaExhaustedIsNotRateLimit(t *testing.T) {
+	// OpenAI answers an account with no credit left with 429 and error.code
+	// insufficient_quota, which no wait clears, so the caller keeps the 502 rather than being
+	// told to back off a limit that is not one.
+	outOfQuota := func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"code":"insufficient_quota","message":"You exceeded your current quota"}}`)
+	}
+	for name, send := range map[string]string{"plain": ping, "stream": streamPing} {
+		t.Run(name, func(t *testing.T) {
+			a := countedUpstream(t, outOfQuota)
+			e := setupRoutes(t, route("*", oaTarget("a", "", a)))
+			res := e.post(t, send)
+			if res.status != http.StatusBadGateway || errorCode(t, res) != "upstream_error" {
+				t.Fatalf("status %d: %s", res.status, res.body)
+			}
+			if got := res.header.Get("Retry-After"); got != "" {
+				t.Fatalf("Retry-After %q on a 502", got)
+			}
+			if r := e.usage(t)[0]; r.Status != http.StatusBadGateway {
+				t.Fatalf("record %+v", r)
+			}
+		})
+	}
+}
+
+func TestQuotaExhaustedStaysAFailureBesideARateLimit(t *testing.T) {
+	// One target is out of quota and the next is only rate limiting, so not every provider is
+	// waiting on a limit: the first cannot answer at any wait, and the route keeps the 502.
+	outOfQuota := func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		// Only error.type here, so this test holds that branch on its own; the test above
+		// covers error.code.
+		_, _ = io.WriteString(w, `{"error":{"type":"insufficient_quota"}}`)
+	}
+	limited := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"slow down"}}`)
+	}
+	a := countedUpstream(t, outOfQuota)
+	b := countedUpstream(t, limited)
+	e := setupRoutes(t, route("*", oaTarget("a", "", a), oaTarget("b", "", b)))
+	res := e.post(t, ping)
+	if res.status != http.StatusBadGateway || errorCode(t, res) != "upstream_error" {
+		t.Fatalf("status %d: %s", res.status, res.body)
+	}
+	if got := res.header.Get("Retry-After"); got != "" {
+		t.Fatalf("Retry-After %q on a 502", got)
+	}
+	if r := e.usage(t)[0]; r.Provider != "b" || r.Fallbacks != 1 {
+		t.Fatalf("record %+v", r)
+	}
+}
+
 func TestStreamFallbackBeforeFirstEvent(t *testing.T) {
 	for name, first := range map[string]http.HandlerFunc{
 		"error status": status(500, "x"),

@@ -61,12 +61,34 @@ const statusOverloaded = 529
 
 // rateLimitWait reports the instant a failed attempt said the caller could retry, and
 // whether it was a rate limit at all. The instant is zero when the provider asked for no wait.
+// A 429 that names a spent quota is not a rate limit: OpenAI answers an account with no credit
+// left with that status and error.code insufficient_quota, which no wait clears, so it stays a
+// failure the caller has to fix rather than one to retry.
 func rateLimitWait(err error) (time.Time, bool) {
 	var pe *provider.Error
 	if errors.As(err, &pe) && (pe.Status == http.StatusTooManyRequests || pe.Status == statusOverloaded) {
+		if quotaExhausted(pe.Body) {
+			return time.Time{}, false
+		}
 		return pe.RetryAt, true
 	}
 	return time.Time{}, false
+}
+
+// quotaExhausted reports whether an upstream error body names a spent quota rather than a
+// caller coming too fast. OpenAI sets error.code to insufficient_quota for it, and some of its
+// errors carry the same word in error.type instead.
+func quotaExhausted(body []byte) bool {
+	var w struct {
+		Error struct {
+			Code string `json:"code"`
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &w) != nil {
+		return false
+	}
+	return w.Error.Code == "insufficient_quota" || w.Error.Type == "insufficient_quota"
 }
 
 // earliestRetry is the earlier of the deadline already recorded and asked. A deadline is an
