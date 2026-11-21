@@ -450,6 +450,14 @@ func splitListenAddr(key, addr string) (host string, port int, err error) {
 	if err != nil || rawPort == "" {
 		return "", 0, fmt.Errorf("config: %s %q must be host:port, such as :8080", key, addr)
 	}
+	// A zone names an interface, and only an IPv6 address takes one: net.Listen reads
+	// "127.0.0.1%lo" and an empty zone as a name to resolve, and refuses a second % with
+	// "invalid argument".
+	if bare, zone, hasZone := strings.Cut(rawHost, "%"); hasZone {
+		if zone == "" || strings.Contains(zone, "%") || net.ParseIP(bare) == nil || net.ParseIP(bare).To4() != nil {
+			return "", 0, fmt.Errorf("config: %s %q has a zone, which only an IPv6 address takes with an interface name", key, addr)
+		}
+	}
 	if n, err := strconv.Atoi(rawPort); err == nil {
 		if n < 0 || n > 65535 {
 			return "", 0, fmt.Errorf("config: %s %q has the port %q, which must be between 0 and 65535", key, addr, rawPort)
@@ -484,24 +492,23 @@ func hostParts(host string) (net.IP, string) {
 }
 
 // wildcardClash reports whether one host is a wildcard that reaches the other, so neither
-// can share the other's port. 0.0.0.0 reaches the IPv4 hosts only, while :: reaches both
-// families, because Go opens a "tcp" listener on a v6 wildcard dual-stack.
+// can share the other's port. Go opens a "tcp" listener on an unspecified address
+// dual-stack, and net.favoriteAddrFamily treats an IPv4 wildcard as the same case as an IPv6
+// one, so 0.0.0.0 and :: each reach every local address. A platform that binds the IPv4
+// wildcard IPv4-only would let the pair through, and refusing it there is the safe way to be
+// wrong: a config that passes and then cannot start is the bug this check exists to catch.
 func wildcardClash(a, b string) bool {
 	if a == "" || b == "" {
 		return true
 	}
-	ia, _ := hostParts(a)
-	ib, _ := hostParts(b)
-	if ia == nil || ib == nil {
-		return false
-	}
-	if ia.IsUnspecified() && ia.To4() == nil || ib.IsUnspecified() && ib.To4() == nil {
-		return true
-	}
-	if ia.IsUnspecified() || ib.IsUnspecified() {
-		return (ia.To4() != nil) == (ib.To4() != nil)
-	}
-	return false
+	return isUnspecifiedHost(a) || isUnspecifiedHost(b)
+}
+
+// isUnspecifiedHost reports whether a listen host is an unspecified address. A name is not
+// one: it reaches whatever it resolves to, which this check does not look up.
+func isUnspecifiedHost(host string) bool {
+	ip, _ := hostParts(host)
+	return ip != nil && ip.IsUnspecified()
 }
 
 // ValidateRuntime checks the part of the config a reload swaps: providers, routes, profiles,
