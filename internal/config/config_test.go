@@ -302,7 +302,7 @@ func TestLoadAcceptsListenAddrs(t *testing.T) {
 }
 
 func TestLoadRefusesAServicePortOnTheNumberItNames(t *testing.T) {
-	if _, err := net.LookupPort("tcp", "http"); err != nil {
+	if _, err := net.DefaultResolver.LookupPort(t.Context(), "tcp", "http"); err != nil {
 		t.Skip("this host has no service list to look the name up in")
 	}
 	_, err := Load(writeFile(t, "listen_addr: \":http\"\nops_listen_addr: \":80\"\n"), nil)

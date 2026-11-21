@@ -3,6 +3,7 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -465,7 +466,7 @@ func splitListenAddr(key, addr string) (host string, port int, err error) {
 		return rawHost, n, nil
 	}
 	// A service name is read from the system's service list, which is local.
-	n, err := net.LookupPort("tcp", rawPort)
+	n, err := net.DefaultResolver.LookupPort(context.Background(), "tcp", rawPort)
 	if err != nil {
 		return "", 0, fmt.Errorf("config: %s %q names the port %q, which is neither a number nor a known service", key, addr, rawPort)
 	}
