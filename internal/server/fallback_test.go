@@ -158,6 +158,36 @@ func TestAllTargetsRateLimited(t *testing.T) {
 	}
 }
 
+func TestRateLimitImmediateOutranksALaterDeadline(t *testing.T) {
+	// A provider that answers Retry-After: 0 is ready now. That is a deadline that has
+	// arrived, not the absence of one, so it stays the earliest and the caller is told the
+	// one-second minimum rather than the 30 seconds the next target asks for.
+	a := countedUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"slow down"}}`)
+	})
+	b := countedUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"message":"slow down"}}`)
+	})
+	e := setupRoutes(t, route("*", oaTarget("a", "", a), oaTarget("b", "", b)))
+	res := e.post(t, ping)
+	if res.status != http.StatusTooManyRequests || errorCode(t, res) != "upstream_rate_limited" {
+		t.Fatalf("status %d: %s", res.status, res.body)
+	}
+	if got := res.header.Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After %q, want 1: a provider ready now outranks a later deadline", got)
+	}
+	if body := string(res.body); !strings.Contains(body, "retry after 1 second") {
+		t.Fatalf("body %q", body)
+	}
+	if recs := e.usage(t); len(recs) != 1 || recs[0].Status != http.StatusTooManyRequests {
+		t.Fatalf("records %+v", recs)
+	}
+}
+
 func TestRateLimitedWithoutRetryAfter(t *testing.T) {
 	// 429 and 529 with no header: the caller still gets a wait, and the default one.
 	a := countedUpstream(t, status(http.StatusTooManyRequests, "{}"))

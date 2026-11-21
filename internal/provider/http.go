@@ -59,10 +59,10 @@ func Send(ctx context.Context, client *http.Client, name, url string, body []byt
 }
 
 // retryAfter reads a Retry-After header, given in seconds or as an HTTP date, as the instant
-// it asks the caller to wait until, bounded to MaxRetryAfter. A header that is absent or does
-// not parse gives the zero time, and so does a non-positive number of seconds. A date already
-// past gives that instant back: the provider asked for a wait that has run out, which is not
-// the same as having asked for none.
+// it asks the caller to wait until, bounded to MaxRetryAfter. A header that is absent, that
+// does not parse, or that gives a negative number of seconds holds no deadline, and gives the
+// zero time. Zero seconds gives now, and a date already past gives that instant back: both are
+// a deadline that has already arrived, which is not the same as having asked for none.
 func retryAfter(h http.Header, now time.Time) time.Time {
 	v := strings.TrimSpace(h.Get("Retry-After"))
 	if v == "" {
@@ -72,8 +72,11 @@ func retryAfter(h http.Header, now time.Time) time.Time {
 	// is a wait longer than any caller should be given, so it reads as one.
 	if secs, err := strconv.ParseInt(v, 10, 64); err == nil || errors.Is(err, strconv.ErrRange) {
 		// Bound before multiplying, since a huge number of seconds overflows the product.
-		if secs <= 0 {
+		if secs < 0 {
 			return time.Time{}
+		}
+		if secs == 0 {
+			return now
 		}
 		if secs >= int64(MaxRetryAfter/time.Second) {
 			return now.Add(MaxRetryAfter)

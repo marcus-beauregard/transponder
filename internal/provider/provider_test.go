@@ -48,7 +48,9 @@ func TestRetryAfter(t *testing.T) {
 	}{
 		{"seconds", "30", now.Add(30 * time.Second)},
 		{"one second", "1", now.Add(time.Second)},
-		{"zero", "0", time.Time{}},
+		// Zero seconds is a provider that is ready now: a deadline that has arrived, not
+		// the absence of one, so it is kept and can outrank a later provider.
+		{"zero", "0", now},
 		{"negative", "-5", time.Time{}},
 		{"absent", "", time.Time{}},
 		{"not a number", "soon", time.Time{}},
