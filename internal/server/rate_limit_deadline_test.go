@@ -35,7 +35,6 @@ func TestRateLimitRetryAfterCountsDown(t *testing.T) {
 		first   func(*testClock) string
 		advance time.Duration
 		want    int
-		slack   int // seconds of give, where the header is read with a different clock
 	}{
 		"seconds": {
 			first:   func(*testClock) string { return "30" },
@@ -48,9 +47,6 @@ func TestRateLimitRetryAfterCountsDown(t *testing.T) {
 			},
 			advance: 20 * time.Second,
 			want:    40,
-			// The provider reads the date with the real clock while the gateway reads the one
-			// the test moves, so a start a second before the boundary can read one second short.
-			slack: 1,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -74,10 +70,35 @@ func TestRateLimitRetryAfterCountsDown(t *testing.T) {
 			if res.status != http.StatusTooManyRequests {
 				t.Fatalf("status %d: %s", res.status, res.body)
 			}
+			// The provider reads the header with the real clock while the gateway reads the one
+			// the test moves, and a date is spelled to the second, so the answer may come back
+			// a second either side of the one named.
 			got, err := strconv.Atoi(res.header.Get("Retry-After"))
-			if err != nil || got < tc.want-tc.slack || got > tc.want+tc.slack {
-				t.Fatalf("Retry-After %q, want %d±%ds: the wait the first target asked for counts down while the second is tried", res.header.Get("Retry-After"), tc.want, tc.slack)
+			if err != nil || got < tc.want-1 || got > tc.want+1 {
+				t.Fatalf("Retry-After %q, want %d±1s: the wait the first target asked for counts down while the second is tried", res.header.Get("Retry-After"), tc.want)
 			}
 		})
+	}
+}
+
+func TestRateLimitKeepsAnExpiredDeadline(t *testing.T) {
+	// A provider whose wait ran out before the answer was written is ready now. The caller
+	// is told the earliest deadline, so a later provider's longer wait must not replace it;
+	// without the expired deadline the answer would say 30 seconds instead of 1.
+	a := countedUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", time.Now().Add(-time.Minute).UTC().Format(http.TimeFormat))
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	b := countedUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	e := setupDeps(t, route("*", oaTarget("a", "", a), oaTarget("b", "", b)), func(*server.Deps) {})
+	res := e.post(t, ping)
+	if res.status != http.StatusTooManyRequests {
+		t.Fatalf("status %d: %s", res.status, res.body)
+	}
+	if got := res.header.Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After %q, want 1: the expired deadline is the earliest one given", got)
 	}
 }

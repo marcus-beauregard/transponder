@@ -55,11 +55,13 @@ type Error struct {
 	Provider  string
 	Status    int
 	Retryable bool
-	// RetryAfter is how long the provider asked the caller to wait, from its Retry-After
-	// header. Zero when it gave none or gave one that could not be read.
-	RetryAfter time.Duration
-	Body       []byte
-	Err        error
+	// RetryAt is the instant the provider asked the caller to wait until, from its
+	// Retry-After header. It is the zero time when the header was absent or could not be
+	// read, and an instant already past when the provider asked for no wait at all:
+	// being ready now is not the same as having asked for nothing.
+	RetryAt time.Time
+	Body    []byte
+	Err     error
 }
 
 func (e *Error) Error() string {

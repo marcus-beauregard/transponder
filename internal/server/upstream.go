@@ -59,26 +59,25 @@ func retryable(err error) bool {
 // rate limit in everything but name: waiting is the only answer that helps.
 const statusOverloaded = 529
 
-// rateLimitWait reports how long a failed attempt asked the caller to wait, and whether it
-// was a rate limit at all.
-func rateLimitWait(err error) (time.Duration, bool) {
+// rateLimitWait reports the instant a failed attempt said the caller could retry, and
+// whether it was a rate limit at all. The instant is zero when the provider asked for no wait.
+func rateLimitWait(err error) (time.Time, bool) {
 	var pe *provider.Error
 	if errors.As(err, &pe) && (pe.Status == http.StatusTooManyRequests || pe.Status == statusOverloaded) {
-		return pe.RetryAfter, true
+		return pe.RetryAt, true
 	}
-	return 0, false
+	return time.Time{}, false
 }
 
-// earliestRetry is the earlier of the deadline already recorded and now+d, where d is the
-// wait a rate-limited provider asked for and zero means it asked for none. A deadline is an
+// earliestRetry is the earlier of the deadline already recorded and asked. A deadline is an
 // instant rather than a duration because the caller is told the wait when the answer is
-// written, which can be long after the attempt that set it.
-func earliestRetry(now, deadline time.Time, d time.Duration) time.Time {
-	if d <= 0 {
+// written, which can be long after the attempt that set it. A deadline already past is still
+// the earliest, so a provider that is ready now is not outwaited by a later one that is not.
+func earliestRetry(deadline, asked time.Time) time.Time {
+	switch {
+	case asked.IsZero():
 		return deadline
-	}
-	asked := now.Add(d)
-	if deadline.IsZero() || asked.Before(deadline) {
+	case deadline.IsZero() || asked.Before(deadline):
 		return asked
 	}
 	return deadline
@@ -141,8 +140,8 @@ func (g *gateway) run(c *call, attempt func() error) {
 		}
 		try.failed(ae.err)
 		upstream, failedTarget, failedAt = ae, t, i
-		if d, ok := rateLimitWait(ae.err); ok {
-			retryBy = earliestRetry(g.d.Now(), retryBy, d)
+		if at, ok := rateLimitWait(ae.err); ok {
+			retryBy = earliestRetry(retryBy, at)
 		} else {
 			rateLimited = false
 		}

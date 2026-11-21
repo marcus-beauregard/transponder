@@ -13,9 +13,9 @@ After `settings.cooldown_failures` failures in a row (default 3), a target is pu
 | Fall back on 5xx, 429, 529, 401 and a closed connection | `TestFallbackOnServerError`, `TestFallbackReasons` in `internal/server/fallback_test.go` |
 | No fallback on the caller's own bad request | `TestNoFallbackOnBadRequest` in `internal/server/fallback_test.go` |
 | Every target fails | `TestAllTargetsFail` in `internal/server/fallback_test.go` |
-| Every target is rate limiting | `TestAllTargetsRateLimited`, `TestRateLimitedWithoutRetryAfter`, `TestRateLimitThenServerError` in `internal/server/fallback_test.go`, and `TestRateLimitRetryAfterCountsDown` in `internal/server/rate_limit_deadline_test.go` |
+| Every target is rate limiting | `TestAllTargetsRateLimited`, `TestRateLimitedWithoutRetryAfter`, `TestRateLimitThenServerError` in `internal/server/fallback_test.go`, and `TestRateLimitRetryAfterCountsDown`, `TestRateLimitKeepsAnExpiredDeadline` in `internal/server/rate_limit_deadline_test.go` |
 | A `Retry-After` is read in both forms and bounded | `TestRetryAfter` in `internal/provider/provider_test.go` |
-| A wait counts from the headers, not from the end of the call | `TestSendCountsDownTheWaitWhileReadingTheBody` in `internal/provider/provider_test.go` |
+| A deadline that has run out stays the earliest one | `TestRateLimitKeepsAnExpiredDeadline` in `internal/server/rate_limit_deadline_test.go` |
 | Cooldown order, end and restart | `TestCooldown` in `internal/router/router_test.go`, `TestCooldownSkipsFailingTarget` in `internal/server/fallback_test.go` |
 | A reload keeps the cooldowns | `TestLoadLiveKeepsCooldowns` in `cmd/transponder/main_test.go`, `TestKeepHealth` in `internal/router/router_test.go` |
 | The record of failing targets stays bounded | `TestHealthIsBounded` in `internal/router/router_test.go` |

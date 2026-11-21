@@ -44,55 +44,48 @@ func Send(ctx context.Context, client *http.Client, name, url string, body []byt
 		return resp, nil
 	}
 	defer func() { _ = resp.Body.Close() }()
-	// Read the wait the headers asked for before the body: an HTTP date is a deadline, and a
-	// slow error body would otherwise push every wait further into the future. The wait counts
-	// from the headers, so the time the body took to arrive comes off it.
-	observed := time.Now()
-	retryWait := retryAfter(resp.Header, observed)
+	// Read the deadline the headers asked for before the body: an HTTP date is an instant,
+	// not a delay, so a slow error body must not push it further into the future.
+	retryAt := retryAfter(resp.Header, time.Now())
 	errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
-	retryWait = waitLeft(retryWait, time.Since(observed))
 	return nil, &Error{
-		Provider:   name,
-		Status:     resp.StatusCode,
-		Retryable:  RetryableStatus(resp.StatusCode),
-		RetryAfter: retryWait,
-		Body:       errBody,
-		Err:        fmt.Errorf("upstream answered %s", resp.Status),
+		Provider:  name,
+		Status:    resp.StatusCode,
+		Retryable: RetryableStatus(resp.StatusCode),
+		RetryAt:   retryAt,
+		Body:      errBody,
+		Err:       fmt.Errorf("upstream answered %s", resp.Status),
 	}
 }
 
-// waitLeft is what remains of a wait once spent has passed since it was measured. A wait
-// that has run out is no wait at all.
-func waitLeft(wait, spent time.Duration) time.Duration {
-	if left := wait - spent; left > 0 {
-		return left
-	}
-	return 0
-}
-
-// retryAfter reads a Retry-After header, given in seconds or as an HTTP date, and cuts it
-// to MaxRetryAfter. A header that does not parse, a wait that is already over, and any
-// other answer give no wait at all.
-func retryAfter(h http.Header, now time.Time) time.Duration {
+// retryAfter reads a Retry-After header, given in seconds or as an HTTP date, as the instant
+// it asks the caller to wait until, bounded to MaxRetryAfter. A header that is absent or does
+// not parse gives the zero time, and so does a non-positive number of seconds. A date already
+// past gives that instant back: the provider asked for a wait that has run out, which is not
+// the same as having asked for none.
+func retryAfter(h http.Header, now time.Time) time.Time {
 	v := strings.TrimSpace(h.Get("Retry-After"))
 	if v == "" {
-		return 0
+		return time.Time{}
 	}
 	// A number too large for an int64 comes back as an error with the largest value, which
 	// is a wait longer than any caller should be given, so it reads as one.
 	if secs, err := strconv.ParseInt(v, 10, 64); err == nil || errors.Is(err, strconv.ErrRange) {
 		// Bound before multiplying, since a huge number of seconds overflows the product.
 		if secs <= 0 {
-			return 0
+			return time.Time{}
 		}
 		if secs >= int64(MaxRetryAfter/time.Second) {
-			return MaxRetryAfter
+			return now.Add(MaxRetryAfter)
 		}
-		return time.Duration(secs) * time.Second
+		return now.Add(time.Duration(secs) * time.Second)
 	}
 	at, err := http.ParseTime(v)
-	if err != nil || !at.After(now) {
-		return 0
+	if err != nil {
+		return time.Time{}
 	}
-	return min(at.Sub(now), MaxRetryAfter)
+	if wait := at.Sub(now); wait > MaxRetryAfter {
+		return now.Add(MaxRetryAfter)
+	}
+	return at
 }

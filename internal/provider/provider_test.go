@@ -44,27 +44,31 @@ func TestRetryAfter(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		header string
-		want   time.Duration
+		want   time.Time
 	}{
-		{"seconds", "30", 30 * time.Second},
-		{"one second", "1", time.Second},
-		{"zero", "0", 0},
-		{"negative", "-5", 0},
-		{"absent", "", 0},
-		{"not a number", "soon", 0},
-		{"a date", now.Add(45 * time.Second).Format(http.TimeFormat), 45 * time.Second},
-		{"a date already past", now.Add(-time.Minute).Format(http.TimeFormat), 0},
-		{"over an hour", "7200", MaxRetryAfter},
-		{"a number that would overflow", "9223372036854775807", MaxRetryAfter},
-		{"a number past int64", "92233720368547758080", MaxRetryAfter},
-		{"a negative number past int64", "-92233720368547758080", 0},
+		{"seconds", "30", now.Add(30 * time.Second)},
+		{"one second", "1", now.Add(time.Second)},
+		{"zero", "0", time.Time{}},
+		{"negative", "-5", time.Time{}},
+		{"absent", "", time.Time{}},
+		{"not a number", "soon", time.Time{}},
+		{"a date", now.Add(45 * time.Second).Format(http.TimeFormat), now.Add(45 * time.Second)},
+		// A date already past is a deadline that has run out, not a provider that gave
+		// none, so it is kept: the caller may retry now rather than wait on a later
+		// provider's longer word.
+		{"a date already past", now.Add(-time.Minute).Format(http.TimeFormat), now.Add(-time.Minute)},
+		{"over an hour", "7200", now.Add(MaxRetryAfter)},
+		{"a number that would overflow", "9223372036854775807", now.Add(MaxRetryAfter)},
+		{"a number past int64", "92233720368547758080", now.Add(MaxRetryAfter)},
+		{"a negative number past int64", "-92233720368547758080", time.Time{}},
+		{"a date past the bound", now.Add(2 * MaxRetryAfter).Format(http.TimeFormat), now.Add(MaxRetryAfter)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := http.Header{}
 			if tc.header != "" {
 				h.Set("Retry-After", tc.header)
 			}
-			if got := retryAfter(h, now); got != tc.want {
+			if got := retryAfter(h, now); !got.Equal(tc.want) {
 				t.Fatalf("retryAfter(%q) = %v, want %v", tc.header, got, tc.want)
 			}
 		})
@@ -77,42 +81,14 @@ func TestSendKeepsRetryAfter(t *testing.T) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	}))
 	defer srv.Close()
+	before := time.Now()
 	_, err := Send(context.Background(), srv.Client(), "p", srv.URL, []byte("{}"), nil, http.Header{})
 	var pe *Error
-	if !errors.As(err, &pe) || pe.Status != http.StatusTooManyRequests || pe.RetryAfter > 30*time.Second || pe.RetryAfter < 29*time.Second {
+	if !errors.As(err, &pe) || pe.Status != http.StatusTooManyRequests {
 		t.Fatalf("err = %v", err)
 	}
-}
-
-func TestSendCountsDownTheWaitWhileReadingTheBody(t *testing.T) {
-	// A wait counts from the headers, so the time the error body takes to arrive comes off it.
-	// The body is held open until the test has seen the headers, so the size of the wait owes
-	// nothing to how fast the machine is: the answer is the minute the provider asked for, less
-	// however long the body was held.
-	started, release := make(chan struct{}), make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Retry-After", "60")
-		w.WriteHeader(http.StatusTooManyRequests)
-		w.(http.Flusher).Flush()
-		close(started)
-		<-release
-		_, _ = w.Write([]byte("{}"))
-	}))
-	defer srv.Close()
-	done := make(chan error, 1)
-	go func() {
-		_, err := Send(context.Background(), srv.Client(), "p", srv.URL, []byte("{}"), nil, http.Header{})
-		done <- err
-	}()
-	<-started
-	close(release)
-	err := <-done
-	var pe *Error
-	if !errors.As(err, &pe) {
-		t.Fatalf("err = %v", err)
-	}
-	if pe.RetryAfter <= 0 || pe.RetryAfter >= time.Minute {
-		t.Fatalf("RetryAfter = %v, want the minute less the time the body took", pe.RetryAfter)
+	if d := pe.RetryAt.Sub(before); d > 31*time.Second || d < 29*time.Second {
+		t.Fatalf("RetryAt is %v away, want about 30 seconds", d)
 	}
 }
 
