@@ -84,7 +84,12 @@ func TestSendKeepsRetryAfter(t *testing.T) {
 	}))
 	defer srv.Close()
 	before := time.Now()
-	_, err := Send(context.Background(), srv.Client(), "p", srv.URL, []byte("{}"), nil, http.Header{})
+	resp, err := Send(context.Background(), srv.Client(), "p", srv.URL, []byte("{}"), nil, http.Header{})
+	// Send closes the body of a failed answer itself and returns no response, but bodyclose
+	// reads the signature, so the response is closed here the way any caller must.
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
 	var pe *Error
 	if !errors.As(err, &pe) || pe.Status != http.StatusTooManyRequests {
 		t.Fatalf("err = %v", err)
