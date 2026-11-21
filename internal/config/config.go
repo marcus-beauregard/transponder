@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -360,6 +361,9 @@ func Load(path string, environ []string) (*Bootstrap, error) {
 }
 
 func (c *Bootstrap) validate() error {
+	if err := checkListenAddrs(c.ListenAddr, c.OpsListenAddr); err != nil {
+		return err
+	}
 	switch c.Limits.Store {
 	case "", "memory":
 	case "sql":
@@ -412,6 +416,92 @@ func (c *Bootstrap) validate() error {
 		return errors.New("config: providers are declared but no routes send models to them")
 	}
 	return nil
+}
+
+// checkListenAddrs checks both listen keys without opening a socket or asking DNS.
+// A value the server cannot listen on stops it at start with an error that does not name
+// the key, and two addresses on one port fail there with "address already in use".
+func checkListenAddrs(listen, ops string) error {
+	host, port, err := splitListenAddr("listen_addr", listen)
+	if err != nil {
+		return err
+	}
+	if ops == "" {
+		return nil
+	}
+	opsHost, opsPort, err := splitListenAddr("ops_listen_addr", ops)
+	if err != nil {
+		return err
+	}
+	// Port 0 asks for a free one, so two of them cannot collide.
+	if port == 0 || opsPort == 0 || port != opsPort {
+		return nil
+	}
+	if sameHost(host, opsHost) || wildcardClash(host, opsHost) {
+		return fmt.Errorf("config: listen_addr %q and ops_listen_addr %q both use port %d; they must differ, since an empty host or an unspecified address can reach the other", listen, ops, port)
+	}
+	return nil
+}
+
+// splitListenAddr returns the host and the port number of a listen address, the same pair
+// net.Listen would take, so a value that would fail there fails here first with the key.
+func splitListenAddr(key, addr string) (host string, port int, err error) {
+	rawHost, rawPort, err := net.SplitHostPort(addr)
+	if err != nil || rawPort == "" {
+		return "", 0, fmt.Errorf("config: %s %q must be host:port, such as :8080", key, addr)
+	}
+	if n, err := strconv.Atoi(rawPort); err == nil {
+		if n < 0 || n > 65535 {
+			return "", 0, fmt.Errorf("config: %s %q has the port %q, which must be between 0 and 65535", key, addr, rawPort)
+		}
+		return rawHost, n, nil
+	}
+	// A service name is read from the system's service list, which is local.
+	n, err := net.LookupPort("tcp", rawPort)
+	if err != nil {
+		return "", 0, fmt.Errorf("config: %s %q names the port %q, which is neither a number nor a known service", key, addr, rawPort)
+	}
+	return rawHost, n, nil
+}
+
+// sameHost compares two listen hosts by address, so ::1 and 0:0:0:0:0:0:0:1 are one host,
+// and a name is compared without case, since a host name is not case-sensitive.
+func sameHost(a, b string) bool {
+	ia, za := hostParts(a)
+	ib, zb := hostParts(b)
+	// A name is compared without case, but a zone names an interface, which is case-sensitive.
+	if za == "" && zb == "" && strings.EqualFold(a, b) {
+		return true
+	}
+	return za == zb && ia != nil && ib != nil && ia.Equal(ib)
+}
+
+// hostParts splits a listen host into its address and its zone, since net.ParseIP does not
+// read a zone, and two link-local addresses on different interfaces are different hosts.
+func hostParts(host string) (net.IP, string) {
+	addr, zone, _ := strings.Cut(host, "%")
+	return net.ParseIP(addr), zone
+}
+
+// wildcardClash reports whether one host is a wildcard that reaches the other, so neither
+// can share the other's port. 0.0.0.0 reaches the IPv4 hosts only, while :: reaches both
+// families, because Go opens a "tcp" listener on a v6 wildcard dual-stack.
+func wildcardClash(a, b string) bool {
+	if a == "" || b == "" {
+		return true
+	}
+	ia, _ := hostParts(a)
+	ib, _ := hostParts(b)
+	if ia == nil || ib == nil {
+		return false
+	}
+	if ia.IsUnspecified() && ia.To4() == nil || ib.IsUnspecified() && ib.To4() == nil {
+		return true
+	}
+	if ia.IsUnspecified() || ib.IsUnspecified() {
+		return (ia.To4() != nil) == (ib.To4() != nil)
+	}
+	return false
 }
 
 // ValidateRuntime checks the part of the config a reload swaps: providers, routes, profiles,
