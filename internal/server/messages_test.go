@@ -218,6 +218,16 @@ func TestMessagesErrors(t *testing.T) {
 			if got := anthropicErrorType(t, res); got != tt.errType {
 				t.Fatalf("error type %s: %s", got, res.body)
 			}
+			if tt.status == http.StatusTooManyRequests {
+				// A rate limit the gateway writes itself still tells the caller when to come
+				// back, and is recorded with the status the caller saw, plain or streamed.
+				if got := res.header.Get("Retry-After"); got != "1" {
+					t.Fatalf("Retry-After %q, want the default second: %s", got, res.body)
+				}
+				if recs := e.usage(t); len(recs) != 1 || recs[0].Status != http.StatusTooManyRequests {
+					t.Fatalf("records %+v", recs)
+				}
+			}
 		})
 	}
 }

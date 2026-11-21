@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"net/http"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -33,19 +34,23 @@ func TestRateLimitRetryAfterCountsDown(t *testing.T) {
 	for name, tc := range map[string]struct {
 		first   func(*testClock) string
 		advance time.Duration
-		want    string
+		want    int
+		slack   int // seconds of give, where the header is read with a different clock
 	}{
 		"seconds": {
 			first:   func(*testClock) string { return "30" },
 			advance: 10 * time.Second,
-			want:    "20",
+			want:    20,
 		},
 		"http date": {
 			first: func(c *testClock) string {
 				return c.Now().Add(time.Minute).UTC().Format(http.TimeFormat)
 			},
 			advance: 20 * time.Second,
-			want:    "40",
+			want:    40,
+			// The provider reads the date with the real clock while the gateway reads the one
+			// the test moves, so a start a second before the boundary can read one second short.
+			slack: 1,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -69,8 +74,9 @@ func TestRateLimitRetryAfterCountsDown(t *testing.T) {
 			if res.status != http.StatusTooManyRequests {
 				t.Fatalf("status %d: %s", res.status, res.body)
 			}
-			if got := res.header.Get("Retry-After"); got != tc.want {
-				t.Fatalf("Retry-After %q, want %q: the wait the first target asked for counts down while the second is tried", got, tc.want)
+			got, err := strconv.Atoi(res.header.Get("Retry-After"))
+			if err != nil || got < tc.want-tc.slack || got > tc.want+tc.slack {
+				t.Fatalf("Retry-After %q, want %d±%ds: the wait the first target asked for counts down while the second is tried", res.header.Get("Retry-After"), tc.want, tc.slack)
 			}
 		})
 	}
