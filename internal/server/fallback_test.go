@@ -12,6 +12,7 @@ import (
 
 	"github.com/raven-clown/transponder/internal/limits"
 	"github.com/raven-clown/transponder/internal/provider/anthropic"
+	"github.com/raven-clown/transponder/internal/provider/echo"
 	oaprovider "github.com/raven-clown/transponder/internal/provider/openai"
 	"github.com/raven-clown/transponder/internal/router"
 )
@@ -119,6 +120,87 @@ func TestAllTargetsFail(t *testing.T) {
 	recs := e.usage(t)
 	if len(recs) != 1 || recs[0].Provider != "b" || recs[0].Fallbacks != 1 || recs[0].Status != 502 {
 		t.Fatalf("records %+v", recs)
+	}
+}
+
+func TestAllTargetsRateLimited(t *testing.T) {
+	limited := func(after string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			if after != "" {
+				w.Header().Set("Retry-After", after)
+			}
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"error":{"message":"slow down"}}`)
+		}
+	}
+	a := countedUpstream(t, limited("30"))
+	b := countedUpstream(t, limited("5"))
+	e := setupRoutes(t, route("*", oaTarget("a", "", a), oaTarget("b", "", b)))
+	res := e.post(t, ping)
+	if res.status != http.StatusTooManyRequests || errorCode(t, res) != "upstream_rate_limited" {
+		t.Fatalf("status %d: %s", res.status, res.body)
+	}
+	if got := res.header.Get("Retry-After"); got != "5" {
+		t.Fatalf("Retry-After %q, want the shortest wait a provider gave", got)
+	}
+	if body := string(res.body); !strings.Contains(body, "retry after 5 seconds") {
+		t.Fatalf("body %q", body)
+	}
+	recs := e.usage(t)
+	if len(recs) != 1 || recs[0].Provider != "b" || recs[0].Fallbacks != 1 || recs[0].Status != http.StatusTooManyRequests {
+		t.Fatalf("records %+v", recs)
+	}
+}
+
+func TestRateLimitedWithoutRetryAfter(t *testing.T) {
+	// 429 and 529 with no header: the caller still gets a wait, and the default one.
+	a := countedUpstream(t, status(http.StatusTooManyRequests, "{}"))
+	b := countedUpstream(t, status(529, "{}"))
+	e := setupRoutes(t, route("*", oaTarget("a", "", a), oaTarget("b", "", b)))
+	res := e.post(t, ping)
+	if res.status != http.StatusTooManyRequests || res.header.Get("Retry-After") != "1" {
+		t.Fatalf("status %d, headers %v: %s", res.status, res.header, res.body)
+	}
+	if body := string(res.body); !strings.Contains(body, "retry after 1 second") || strings.Contains(body, "1 seconds") {
+		t.Fatalf("body %q", body)
+	}
+}
+
+func TestRateLimitThenServerError(t *testing.T) {
+	a := countedUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "5")
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	b := countedUpstream(t, status(http.StatusServiceUnavailable, "y"))
+	e := setupRoutes(t, route("*", oaTarget("a", "", a), oaTarget("b", "", b)))
+	res := e.post(t, ping)
+	// One target that could not answer at all keeps the 502: the wait would be a guess.
+	if res.status != http.StatusBadGateway || errorCode(t, res) != "upstream_error" {
+		t.Fatalf("status %d: %s", res.status, res.body)
+	}
+	if got := res.header.Get("Retry-After"); got != "" {
+		t.Fatalf("Retry-After %q on a 502", got)
+	}
+	if body := string(res.body); !strings.Contains(body, "no provider for this model could answer") {
+		t.Fatalf("body %q", body)
+	}
+	if r := e.usage(t)[0]; r.Status != http.StatusBadGateway || r.Provider != "b" {
+		t.Fatalf("record %+v", r)
+	}
+}
+
+func TestRateLimitWithSkippedTarget(t *testing.T) {
+	// One target cannot carry an image and the other is rate limiting, so not every provider
+	// is waiting on a limit: the caller keeps the 502 and fixes the request.
+	limited := statusUpstream(t, http.StatusTooManyRequests, "{}")
+	routes := []router.Route{{Match: "*", Targets: []router.Target{
+		{Provider: echo.New("echo"), Type: "echo"},
+		{Provider: anthropic.New("claude", limited.URL, "sk-ant-gateway", limited.Client()), Type: "anthropic"},
+	}}}
+	e := setupRoutes(t, routes)
+	res := e.messages(t, nil, `{"model":"m","max_tokens":1,"messages":[{"role":"user","content":[{"type":"image","source":{}}]}]}`)
+	if res.status != http.StatusBadGateway || errorCode(t, res) != "upstream_error" {
+		t.Fatalf("status %d: %s", res.status, res.body)
 	}
 }
 

@@ -3,9 +3,13 @@ package provider
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
+	"time"
 )
 
 const maxErrorBody = 1 << 20
@@ -42,10 +46,38 @@ func Send(ctx context.Context, client *http.Client, name, url string, body []byt
 	defer func() { _ = resp.Body.Close() }()
 	errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 	return nil, &Error{
-		Provider:  name,
-		Status:    resp.StatusCode,
-		Retryable: RetryableStatus(resp.StatusCode),
-		Body:      errBody,
-		Err:       fmt.Errorf("upstream answered %s", resp.Status),
+		Provider:   name,
+		Status:     resp.StatusCode,
+		Retryable:  RetryableStatus(resp.StatusCode),
+		RetryAfter: retryAfter(resp.Header, time.Now()),
+		Body:       errBody,
+		Err:        fmt.Errorf("upstream answered %s", resp.Status),
 	}
+}
+
+// retryAfter reads a Retry-After header, given in seconds or as an HTTP date, and cuts it
+// to MaxRetryAfter. A header that does not parse, a wait that is already over, and any
+// other answer give no wait at all.
+func retryAfter(h http.Header, now time.Time) time.Duration {
+	v := strings.TrimSpace(h.Get("Retry-After"))
+	if v == "" {
+		return 0
+	}
+	// A number too large for an int64 comes back as an error with the largest value, which
+	// is a wait longer than any caller should be given, so it reads as one.
+	if secs, err := strconv.ParseInt(v, 10, 64); err == nil || errors.Is(err, strconv.ErrRange) {
+		// Bound before multiplying, since a huge number of seconds overflows the product.
+		if secs <= 0 {
+			return 0
+		}
+		if secs >= int64(MaxRetryAfter/time.Second) {
+			return MaxRetryAfter
+		}
+		return time.Duration(secs) * time.Second
+	}
+	at, err := http.ParseTime(v)
+	if err != nil || !at.After(now) {
+		return 0
+	}
+	return min(at.Sub(now), MaxRetryAfter)
 }

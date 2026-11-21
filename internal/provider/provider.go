@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/raven-clown/transponder/internal/schema"
 )
@@ -45,13 +46,20 @@ type Native interface {
 	Native(ctx context.Context, call *NativeCall) (*http.Response, error)
 }
 
+// MaxRetryAfter bounds the wait a provider may ask a caller for. A longer one is cut to
+// this, since a provider that wants hours is one the caller should retry by hand.
+const MaxRetryAfter = time.Hour
+
 // Error is a failed upstream call. Status is 0 when no response arrived.
 type Error struct {
 	Provider  string
 	Status    int
 	Retryable bool
-	Body      []byte
-	Err       error
+	// RetryAfter is how long the provider asked the caller to wait, from its Retry-After
+	// header. Zero when it gave none or gave one that could not be read.
+	RetryAfter time.Duration
+	Body       []byte
+	Err        error
 }
 
 func (e *Error) Error() string {

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/raven-clown/transponder/internal/schema"
 )
@@ -34,6 +36,51 @@ func TestErrorMessage(t *testing.T) {
 	conn := &Error{Provider: "local", Err: cause}
 	if !strings.Contains(conn.Error(), "boom") {
 		t.Fatalf("message %q", conn.Error())
+	}
+}
+
+func TestRetryAfter(t *testing.T) {
+	now := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name   string
+		header string
+		want   time.Duration
+	}{
+		{"seconds", "30", 30 * time.Second},
+		{"one second", "1", time.Second},
+		{"zero", "0", 0},
+		{"negative", "-5", 0},
+		{"absent", "", 0},
+		{"not a number", "soon", 0},
+		{"a date", now.Add(45 * time.Second).Format(http.TimeFormat), 45 * time.Second},
+		{"a date already past", now.Add(-time.Minute).Format(http.TimeFormat), 0},
+		{"over an hour", "7200", MaxRetryAfter},
+		{"a number that would overflow", "9223372036854775807", MaxRetryAfter},
+		{"a number past int64", "92233720368547758080", MaxRetryAfter},
+		{"a negative number past int64", "-92233720368547758080", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := http.Header{}
+			if tc.header != "" {
+				h.Set("Retry-After", tc.header)
+			}
+			if got := retryAfter(h, now); got != tc.want {
+				t.Fatalf("retryAfter(%q) = %v, want %v", tc.header, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSendKeepsRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+	_, err := Send(context.Background(), srv.Client(), "p", srv.URL, []byte("{}"), nil, http.Header{})
+	var pe *Error
+	if !errors.As(err, &pe) || pe.Status != http.StatusTooManyRequests || pe.RetryAfter != 30*time.Second {
+		t.Fatalf("err = %v", err)
 	}
 }
 

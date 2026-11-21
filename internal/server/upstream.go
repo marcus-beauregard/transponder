@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/raven-clown/transponder/internal/dialect/openai"
 	"github.com/raven-clown/transponder/internal/provider"
@@ -53,6 +55,28 @@ func retryable(err error) bool {
 	return !errors.Is(err, errUpstreamTooLarge)
 }
 
+// statusOverloaded is Anthropic's status for a provider that is over capacity, which is a
+// rate limit in everything but name: waiting is the only answer that helps.
+const statusOverloaded = 529
+
+// rateLimitWait reports how long a failed attempt asked the caller to wait, and whether it
+// was a rate limit at all.
+func rateLimitWait(err error) (time.Duration, bool) {
+	var pe *provider.Error
+	if errors.As(err, &pe) && (pe.Status == http.StatusTooManyRequests || pe.Status == statusOverloaded) {
+		return pe.RetryAfter, true
+	}
+	return 0, false
+}
+
+// shortestWait is the shorter of two waits the providers gave, where zero means none given.
+func shortestWait(a, b time.Duration) time.Duration {
+	if a == 0 || (b > 0 && b < a) {
+		return b
+	}
+	return a
+}
+
 // run tries the plan's targets in order until one answers. attempt returns nil once it has
 // written a response, and an error when its target failed before anything reached the caller.
 // It stops at the first error another provider would not fix: the caller's own bad request, a
@@ -62,6 +86,10 @@ func (g *gateway) run(c *call, attempt func() error) {
 	var upstream, input *attemptError
 	var failedTarget router.Resolved
 	failedAt := 0
+	// rateLimited says every attempt so far was answered with 429 or 529, and wait is the
+	// shortest Retry-After any of them gave.
+	rateLimited := true
+	var wait time.Duration
 	for i, t := range c.plan.Targets {
 		g.use(c, t, i)
 		try := g.try(c, i)
@@ -85,12 +113,20 @@ func (g *gateway) run(c *call, attempt func() error) {
 		}
 		if ae.input {
 			input = ae
+			// A target that could not take the request never answered, so the caller is not
+			// told that every provider is rate limiting when one of them was skipped.
+			rateLimited = false
 			try.skipped()
 			g.fellBack(c, i, "unsupported")
 			continue
 		}
 		try.failed(ae.err)
 		upstream, failedTarget, failedAt = ae, t, i
+		if d, ok := rateLimitWait(ae.err); ok {
+			wait = shortestWait(wait, d)
+		} else {
+			rateLimited = false
+		}
 		if ctx.Err() != nil || !retryable(ae.err) {
 			break
 		}
@@ -105,6 +141,10 @@ func (g *gateway) run(c *call, attempt func() error) {
 		// An outage outranks a target that could not take the request, and the answer names
 		// the target that had it, not one that was skipped after it.
 		g.use(c, failedTarget, failedAt)
+		if rateLimited {
+			g.rateLimited(c, wait)
+			return
+		}
 		g.upstreamFailed(c, upstream.err, upstream.same)
 	case input != nil:
 		g.rejected(c, input.err)
@@ -162,10 +202,41 @@ func (g *gateway) upstreamFailed(c *call, err error, sameDialect bool) {
 		c.fail(c.w, http.StatusBadRequest, "invalid_request_error", "unsupported", "model", msg)
 		c.rec.Status = http.StatusBadRequest
 	default:
-		c.fail(c.w, http.StatusBadGateway, "api_error", "upstream_error", "", "the provider did not answer")
+		c.fail(c.w, http.StatusBadGateway, "api_error", "upstream_error", "", "no provider for this model could answer")
 		c.rec.Status = http.StatusBadGateway
 	}
 	g.recordCall(ctx, c)
+}
+
+// rateLimited answers a call whose every attempt was rate limiting, with the shortest wait
+// a provider asked for, so an SDK backs off instead of treating the gateway as broken.
+func (g *gateway) rateLimited(c *call, wait time.Duration) {
+	ctx := c.r.Context()
+	if callerGone(c) {
+		g.d.Logger.InfoContext(ctx, "caller left before the answer", "provider", c.rec.Provider)
+		c.w.WriteHeader(statusCallerGone)
+		c.rec.Status = statusCallerGone
+		g.recordCall(ctx, c)
+		return
+	}
+	if wait <= 0 {
+		wait = time.Second
+	}
+	secs := int((wait + time.Second - 1) / time.Second)
+	g.d.Logger.WarnContext(ctx, "every provider is rate limiting", "provider", c.rec.Provider, "retry_after", secs)
+	c.w.Header().Set("Retry-After", strconv.Itoa(secs))
+	c.fail(c.w, http.StatusTooManyRequests, "api_error", "upstream_rate_limited", "",
+		"every provider for this model is rate limiting; retry after "+waitText(secs))
+	c.rec.Status = http.StatusTooManyRequests
+	g.recordCall(ctx, c)
+}
+
+// waitText says how long to wait, in whole seconds, in a sentence.
+func waitText(secs int) string {
+	if secs == 1 {
+		return "1 second"
+	}
+	return strconv.Itoa(secs) + " seconds"
 }
 
 // statusCallerGone records a call whose caller closed the connection before the answer ended,
