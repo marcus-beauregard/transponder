@@ -4,6 +4,10 @@ All notable changes are listed here. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added
+
+- `GET /admin/v1/status` lists the targets in cooldown as `cooldowns`, each with its route, provider, model, failures and when its cooldown ends and it is tried in its configured order again, so a target that keeps failing can be seen without reading `transponder_fallbacks_total`. The list is this replica's view, because cooldown state is kept per replica (#185).
+
 ## [0.3.1] - 2026-11-21
 
 ### Changed
